@@ -16,14 +16,18 @@ class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
         self._contracts = contracts
+        self._tool_names: list[str] | None = None
 
     @property
     def contracts(self) -> Contracts:
         return self._contracts
 
     async def list_tools(self) -> list[str]:
+        if self._tool_names is not None:
+            return list(self._tool_names)
         response = await self._session.list_tools()
-        return sorted(tool.name for tool in response.tools)
+        self._tool_names = sorted(tool.name for tool in response.tools)
+        return list(self._tool_names)
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
