@@ -2,26 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from .agents import collect_evidence
+from .agents.coordinator import TransientCaseError, run_case
 from .mcp_gateway import EvidenceGateway
-from .state import AGENT_ROLES, EVIDENCE_REF_PATTERN, CaseState, EvidenceLedger, Handoff
+from .state import AGENT_ROLES, EVIDENCE_REF_PATTERN, EvidenceLedger, Handoff
 from .trace import TraceWriter
 
-__all__ = ["AGENT_ROLES", "EVIDENCE_REF_PATTERN", "EvidenceLedger", "Handoff", "solve_case"]
+__all__ = [
+    "AGENT_ROLES",
+    "EVIDENCE_REF_PATTERN",
+    "EvidenceLedger",
+    "Handoff",
+    "TransientCaseError",
+    "solve_case",
+]
 
 
 async def solve_case(
-    case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
+    case: dict[str, Any],
+    gateway: EvidenceGateway,
+    trace: TraceWriter,
+    *,
+    allow_partial: bool = True,
 ) -> dict[str, Any]:
-    """Coordinator + specialists gather evidence (Pha 3); policy/verifier decide (Pha 4).
+    """Coordinator -> specialists -> policy -> verifier; returns a verified l3a-output-v2.
 
-    No fallback answer is generated: an invented answer or evidence reference would
-    violate the competition contract.
+    No fallback answer is invented: missing evidence yields ``insufficient_evidence``.
+    With ``allow_partial=False`` a case whose evidence was lost to network errors raises
+    ``TransientCaseError`` so the caller can reconnect and re-run it.
     """
-    state = await collect_evidence(case, gateway, trace)
-    return decide_and_verify(state, trace)
-
-
-def decide_and_verify(state: CaseState, trace: TraceWriter) -> dict[str, Any]:
-    """Policy agent + verifier: turn the evidence state into an l3a-output-v2 object."""
-    raise NotImplementedError("Pha 4: policy/verifier")
+    output, _ = await run_case(case, gateway, trace, allow_partial=allow_partial)
+    return output

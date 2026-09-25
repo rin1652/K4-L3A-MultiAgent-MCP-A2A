@@ -156,7 +156,11 @@ class Specialist:
 
 class OrderItemAgent(Specialist):
     actor = Actor.ORDER_ITEM
-    plan = (ToolStep("get_order"), ToolStep("get_seller"))
+    plan = (
+        ToolStep("get_order"),
+        ToolStep("get_order_items"),
+        ToolStep("get_sellers"),
+    )
 
     def find_conflicts(self) -> list[DataConflict]:
         request = self.case.get("customer_request") or {}
@@ -184,12 +188,16 @@ class OrderItemAgent(Specialist):
 
 class PaymentAgent(Specialist):
     actor = Actor.PAYMENT
-    plan = (ToolStep("get_payment"),)
+    plan = (
+        ToolStep("get_order_payments"),
+        ToolStep("get_payment_timeline"),
+        ToolStep("get_refund_timeline"),
+    )
 
 
 class ShipmentAgent(Specialist):
     actor = Actor.SHIPMENT
-    plan = (ToolStep("get_shipment"),)
+    plan = (ToolStep("get_shipment_summary"),)
 
 
 SPECIALIST_TYPES: tuple[type[Specialist], ...] = (OrderItemAgent, PaymentAgent, ShipmentAgent)

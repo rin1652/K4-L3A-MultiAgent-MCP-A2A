@@ -1,8 +1,9 @@
 """Which actor may call which MCP tool, and which evidence domains it may consume.
 
-Tool names are the ones the competition brief lists for discovery; a tool is only ever
-called if ``gateway.describe_tools()`` actually returned it. Update this table from
-docs/mcp-tools.md once discovery succeeds -- it is the single place permissions live.
+Tool names come from real discovery (docs/mcp-tools.md); a tool is only ever called if
+``gateway.describe_tools()`` returned it. This table is the single place permissions live.
+``get_customer_history`` and ``get_product_context`` are deliberately unassigned: no L3A
+decision needs another order of the customer or the product catalogue.
 """
 
 from __future__ import annotations
@@ -14,9 +15,17 @@ from .state import Actor
 TOOL_GRANTS: Mapping[Actor, Mapping[str, str]] = {
     # actor -> {tool_name: primary evidence domain}
     Actor.COORDINATOR: {},
-    Actor.ORDER_ITEM: {"get_order": "order", "get_seller": "seller"},
-    Actor.PAYMENT: {"get_payment": "payment"},
-    Actor.SHIPMENT: {"get_shipment": "shipment"},
+    Actor.ORDER_ITEM: {
+        "get_order": "order",
+        "get_order_items": "item",
+        "get_sellers": "seller",
+    },
+    Actor.PAYMENT: {
+        "get_order_payments": "payment",
+        "get_payment_timeline": "payment",
+        "get_refund_timeline": "refund",
+    },
+    Actor.SHIPMENT: {"get_shipment_summary": "shipment"},
     Actor.POLICY: {"get_policy": "policy"},
     Actor.VERIFIER: {},
 }

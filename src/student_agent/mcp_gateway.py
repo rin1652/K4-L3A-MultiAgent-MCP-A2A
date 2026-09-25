@@ -27,8 +27,20 @@ CONNECT_ATTEMPTS = 3
 CONNECT_BACKOFF_SECONDS = 2.0
 
 
+def _tool_input_schema(tool: Any) -> dict[str, Any]:
+    # mcp>=2 exposes ``input_schema``; 1.x used ``inputSchema``.
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = getattr(tool, "inputSchema", None)
+    return schema or {}
+
+
 class GatewayConnectionError(RuntimeError):
     """The MCP session could not be opened; the message never contains credentials."""
+
+    def __init__(self, message: str, *, transient: bool) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 def leaf_errors(exc: BaseException) -> list[BaseException]:
@@ -62,8 +74,7 @@ class EvidenceGateway:
         self._tool_specs: dict[str, dict[str, Any]] | None = None
 
     async def list_tools(self) -> list[str]:
-        response = await self._session.list_tools()
-        return sorted(tool.name for tool in response.tools)
+        return sorted(await self.describe_tools())
 
     async def describe_tools(self) -> dict[str, dict[str, Any]]:
         """Discovered tools as ``{name: {"description": str, "input_schema": dict}}`` (cached)."""
@@ -72,7 +83,7 @@ class EvidenceGateway:
             self._tool_specs = {
                 tool.name: {
                     "description": tool.description or "",
-                    "input_schema": dict(tool.inputSchema or {}),
+                    "input_schema": dict(_tool_input_schema(tool)),
                 }
                 for tool in response.tools
             }
@@ -81,7 +92,8 @@ class EvidenceGateway:
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        # mcp>=2 names the flag ``is_error``; 1.x used ``isError``.
+        if getattr(result, "is_error", None) or getattr(result, "isError", None):
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
@@ -123,11 +135,13 @@ async def connect_gateway(
             await stack.aclose()
             if not is_transport_error(exc):
                 raise GatewayConnectionError(
-                    f"MCP gateway rejected the session (not retried): {describe_error(exc)}"
+                    f"MCP gateway rejected the session (not retried): {describe_error(exc)}",
+                    transient=False,
                 ) from exc
             if attempt == attempts:
                 raise GatewayConnectionError(
-                    f"cannot reach MCP gateway after {attempts} attempts: {describe_error(exc)}"
+                    f"cannot reach MCP gateway after {attempts} attempts: {describe_error(exc)}",
+                    transient=True,
                 ) from exc
             await sleep(backoff * attempt)
             continue
