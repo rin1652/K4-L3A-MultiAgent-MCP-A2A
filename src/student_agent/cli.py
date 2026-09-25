@@ -27,6 +27,65 @@ async def _show_tools(root: Path) -> None:
             print(tool)
 
 
+def _iter_exceptions(exc: BaseException) -> list[BaseException]:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    ordered: list[BaseException] = []
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        ordered.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+        for linked in (getattr(current, "__cause__", None), getattr(current, "__context__", None)):
+            if isinstance(linked, BaseException):
+                stack.append(linked)
+    return ordered
+
+
+_NETWORK_MARKERS = (
+    "connecterror",
+    "connecttimeout",
+    "readtimeout",
+    "writetimeout",
+    "pooltimeout",
+    "remoteprotocolerror",
+    "getaddrinfo",
+    "temporarily unavailable",
+    "connection reset",
+    "server disconnected",
+    "brokenresource",
+    "closedresource",
+    "ssl",
+    "server returned an error response",  # MCPError at session.initialize()
+    "mcperror",
+)
+_TOOL_FAIL_MARKER = "mcp tool"  # RuntimeError("MCP tool X failed: ...")
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """Return True only when the root cause is a genuine network/transport error.
+
+    Tool-level failures (RuntimeError from gateway.call) are NOT transient —
+    they indicate a server-side issue with a specific tool call, not the
+    connection itself.
+    """
+    leafs = _iter_exceptions(exc)
+    has_network = False
+    for item in leafs:
+        name = type(item).__name__.lower()
+        text = str(item).lower()
+        # Tool-level failure ("MCP tool X failed: ...") is not a network error
+        if _TOOL_FAIL_MARKER in text and " failed" in text:
+            return False
+        if any(marker in name or marker in text for marker in _NETWORK_MARKERS):
+            has_network = True
+    return has_network
+
+
 async def _run(root: Path) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
@@ -40,24 +99,72 @@ async def _run(root: Path) -> None:
     trace_path.unlink(missing_ok=True)
     trace = TraceWriter(trace_path, contracts)
 
-    async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
-        discovered_tools = await gateway.list_tools()
-        if not discovered_tools:
-            raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
-            case = case_set.cases[case_id]
-            trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-            output = await solve_case(case, gateway, trace)
-            contracts.validate_output(output, f"outputs/{case_id}.json")
-            if output.get("case_id") != case_id:
-                raise ValueError(f"solver returned a mismatched case_id for {case_id}")
-            target = output_root / f"{case_id}.json"
-            temporary = target.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    case_ids = list(case_set.case_ids)
+    index = 0
+    reconnect_attempts = 0
+    batch_size = 25
+
+    while index < len(case_ids):
+        batch_end = min(index + batch_size, len(case_ids))
+        try:
+            async with connect_gateway(
+                settings.mcp_endpoint, settings.team_api_key, contracts
+            ) as gateway:
+                discovered_tools = await gateway.list_tools()
+                if not discovered_tools:
+                    raise RuntimeError("MCP Gateway returned no tools")
+                while index < batch_end:
+                    case_id = case_ids[index]
+                    case = case_set.cases[case_id]
+                    trace.emit(
+                        case_id=case_id, event_type="case_received", actor="coordinator"
+                    )
+                    output = await solve_case(case, gateway, trace)
+                    contracts.validate_output(output, f"outputs/{case_id}.json")
+                    if output.get("case_id") != case_id:
+                        raise ValueError(
+                            f"solver returned a mismatched case_id for {case_id}"
+                        )
+                    if not output.get("evidence_refs"):
+                        raise RuntimeError(
+                            f"MCP returned no evidence for {case_id}; "
+                            "server may be blocking this run — wait and retry later"
+                        )
+                    target = output_root / f"{case_id}.json"
+                    temporary = target.with_suffix(".json.tmp")
+                    temporary.write_text(
+                        json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    temporary.replace(target)
+                    trace.emit(
+                        case_id=case_id,
+                        event_type="case_finalized",
+                        actor="coordinator",
+                    )
+                    index += 1
+                    reconnect_attempts = 0
+                    print(f"OK {case_id} ({index}/{len(case_ids)})", flush=True)
+                await asyncio.sleep(0.5)
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            if not _is_transient_network_error(exc):
+                raise
+            reconnect_attempts += 1
+            case_id = case_ids[min(index, len(case_ids) - 1)]
+            if reconnect_attempts > 8:
+                raise RuntimeError(
+                    f"MCP network failed repeatedly at {case_id}"
+                ) from exc
+            wait_s = min(5 * reconnect_attempts, 40)
+            print(
+                f"WARN network drop near {case_id}; reconnect "
+                f"{reconnect_attempts}/8 after {wait_s}s ({type(exc).__name__})",
+                flush=True,
             )
-            temporary.replace(target)
-            trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            await asyncio.sleep(wait_s)
+
 
 
 def parser() -> argparse.ArgumentParser:
@@ -95,7 +202,9 @@ def main() -> None:
         elif args.command == "package":
             destination = package_submission(root, root / args.output)
             print(f"OK: {destination}")
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, BaseExceptionGroup) as exc:
+        import traceback as _tb
+        _tb.print_exc(file=sys.stderr)
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
