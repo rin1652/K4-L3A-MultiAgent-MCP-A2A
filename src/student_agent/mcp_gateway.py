@@ -17,6 +17,10 @@ class EvidenceGateway:
         self._session = session
         self._contracts = contracts
 
+    @property
+    def contracts(self) -> Contracts:
+        return self._contracts
+
     async def list_tools(self) -> list[str]:
         response = await self._session.list_tools()
         return sorted(tool.name for tool in response.tools)
@@ -24,7 +28,8 @@ class EvidenceGateway:
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        is_error = getattr(result, "isError", getattr(result, "is_error", False))
+        if is_error:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
