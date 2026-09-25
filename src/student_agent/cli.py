@@ -10,6 +10,7 @@ from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
 from .mcp_gateway import connect_gateway
+from .permissions import owner_of
 from .submission import package_submission, validate_artifacts
 from .tools_doc import render_tools_markdown
 from .trace import TraceWriter
@@ -29,7 +30,8 @@ async def _show_tools(root: Path, doc: str | None = None) -> None:
         if doc:
             target = root / doc
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(render_tools_markdown(await gateway.describe_tools()), "utf-8")
+            markdown = render_tools_markdown(await gateway.describe_tools(), owner_of)
+            target.write_text(markdown, encoding="utf-8")
             print(f"OK: {target}")
 
 
