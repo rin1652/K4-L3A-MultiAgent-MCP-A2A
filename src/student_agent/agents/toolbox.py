@@ -8,12 +8,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-import anyio
-import httpx2
 from mcp.shared.exceptions import MCPError
-from mcp_types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
 from ..contracts import ContractError
+from ..mcp_gateway import TRANSIENT_ERRORS, TRANSIENT_MCP_CODES
 from ..permissions import DOMAIN_GRANTS, check_tool
 from ..state import Actor, CrossCaseGuard, EvidenceItem, EvidenceLedger, MissingReason
 
@@ -24,15 +22,7 @@ class Gateway(Protocol):
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]: ...
 
 
-TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
-    TimeoutError,
-    ConnectionError,
-    httpx2.TransportError,
-    anyio.ClosedResourceError,
-    anyio.BrokenResourceError,
-)
 CallKey = tuple[str, tuple[tuple[str, str], ...]]
-TRANSIENT_MCP_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
 # Word-bounded so hex identifiers such as "a404b" never match a status code.
 _NOT_FOUND = re.compile(r"not[ _]found|\bno such\b|\b404\b")
 _FORBIDDEN = re.compile(r"forbidden|not allowed|out of scope|unauthori[sz]ed|\b40[13]\b")
