@@ -11,6 +11,7 @@ from .config import Settings
 from .contracts import Contracts
 from .mcp_gateway import connect_gateway
 from .submission import package_submission, validate_artifacts
+from .tools_doc import render_tools_markdown
 from .trace import TraceWriter
 from .workflow import solve_case
 
@@ -19,12 +20,17 @@ def _root(value: str) -> Path:
     return Path(value).resolve()
 
 
-async def _show_tools(root: Path) -> None:
+async def _show_tools(root: Path, doc: str | None = None) -> None:
     settings = Settings.load(root)
     contracts = Contracts(root / "contracts" / "schemas")
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         for tool in await gateway.list_tools():
             print(tool)
+        if doc:
+            target = root / doc
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(render_tools_markdown(await gateway.describe_tools()), "utf-8")
+            print(f"OK: {target}")
 
 
 async def _run(root: Path) -> None:
@@ -65,7 +71,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--root", default=".", help="repository root (default: current directory)")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
-    commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    tools = commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    tools.add_argument("--doc", help="also write a Markdown catalogue, e.g. docs/mcp-tools.md")
     commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -84,7 +91,7 @@ def main() -> None:
                 f"{len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
-            asyncio.run(_show_tools(root))
+            asyncio.run(_show_tools(root, args.doc))
         elif args.command == "run":
             asyncio.run(_run(root))
         elif args.command == "validate":

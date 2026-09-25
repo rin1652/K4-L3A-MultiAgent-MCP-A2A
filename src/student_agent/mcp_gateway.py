@@ -16,10 +16,24 @@ class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
         self._contracts = contracts
+        self._tool_specs: dict[str, dict[str, Any]] | None = None
 
     async def list_tools(self) -> list[str]:
         response = await self._session.list_tools()
         return sorted(tool.name for tool in response.tools)
+
+    async def describe_tools(self) -> dict[str, dict[str, Any]]:
+        """Discovered tools as ``{name: {"description": str, "input_schema": dict}}`` (cached)."""
+        if self._tool_specs is None:
+            response = await self._session.list_tools()
+            self._tool_specs = {
+                tool.name: {
+                    "description": tool.description or "",
+                    "input_schema": dict(tool.inputSchema or {}),
+                }
+                for tool in response.tools
+            }
+        return self._tool_specs
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
