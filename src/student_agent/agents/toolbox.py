@@ -13,7 +13,14 @@ from mcp.shared.exceptions import MCPError
 from ..contracts import ContractError
 from ..mcp_gateway import TRANSIENT_ERRORS, TRANSIENT_MCP_CODES
 from ..permissions import DOMAIN_GRANTS, check_tool
-from ..state import Actor, CrossCaseGuard, EvidenceItem, EvidenceLedger, MissingReason
+from ..state import (
+    Actor,
+    CrossCaseGuard,
+    EvidenceItem,
+    EvidenceLedger,
+    MissingReason,
+    iter_id_fields,
+)
 
 
 class Gateway(Protocol):
@@ -160,6 +167,18 @@ class ScopedGateway:
         if "case_id" in arguments:
             raise ValueError("case_id is fixed by the case toolbox")
         envelope = await self._toolbox.fetch(tool_name, arguments)
+        requested_order_id = arguments.get("order_id")
+        if requested_order_id:
+            returned_order_ids = {
+                value for key, value in iter_id_fields(envelope.get("data")) if key == "order_id"
+            }
+            foreign_order_ids = returned_order_ids - {requested_order_id}
+            if foreign_order_ids:
+                raise ToolCallFailure(
+                    MissingReason.DOMAIN_MISMATCH,
+                    tool_name,
+                    "evidence contains a different order_id",
+                )
         try:
             self._toolbox.accept(self.actor, envelope)
         except ToolCallFailure as failure:

@@ -84,7 +84,10 @@ def test_each_issue_is_decided_from_evidence_despite_decoy_rows(issue: str, tmp_
     ]
     assert output["resolution_actions"] == [action]
     assert output["affected_entities"]["order_ids"] == [ORDER_ID]
-    assert output["affected_entities"]["item_ids"] == [ITEM_ID]
+    if issue in {"refund_pending", "refund_failed", "unsupported_claim"}:
+        assert output["affected_entities"]["item_ids"] == []
+    else:
+        assert output["affected_entities"]["item_ids"] == [ITEM_ID]
     assert set(output["evidence_refs"]) <= set(gateway.issued)
     assert 0 < output["assessment"]["confidence"] < 1
     verdicts = {c["claim_id"]: c["verdict"] for c in output["claim_assessments"]}
@@ -94,6 +97,13 @@ def test_each_issue_is_decided_from_evidence_despite_decoy_rows(issue: str, tmp_
 def test_policy_example_seller_id_is_never_copied(tmp_path: Path) -> None:
     output, _ = _solve("unavailable_order_paid", tmp_path)
     assert "seller-from-policy-example" not in json.dumps(output)
+
+
+def test_requested_full_refund_is_evaluated_against_the_captured_total(tmp_path: Path) -> None:
+    output, _ = _solve("canceled_order_paid", tmp_path)
+    claims = {claim["claim_id"]: claim for claim in output["claim_assessments"]}
+    assert claims["claim-b"]["verdict"] == "supported"
+    assert claims["claim-b"]["evidence_refs"]
 
 
 def test_customer_framing_does_not_override_evidence(tmp_path: Path) -> None:

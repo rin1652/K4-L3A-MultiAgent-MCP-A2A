@@ -7,7 +7,7 @@ from typing import Any
 from ..contracts import ContractError, Contracts
 from ..state import CaseState, iter_id_fields
 from .facts import CENT, extract_facts
-from .policy import PolicyDecision
+from .policy import REQUIRED_EVIDENCE, SUPPORTING_EVIDENCE, PolicyDecision
 
 CONFLICT_CONFIDENCE_CAP = 0.85
 
@@ -40,20 +40,42 @@ def verify(state: CaseState, output: dict[str, Any], contracts: Contracts) -> li
     issue = output["assessment"]["primary_issue"]
     if issue != "insufficient_evidence" and not output.get("evidence_refs"):
         problems.append("conclusion_without_evidence")
+    facts = extract_facts(state)
+    if issue != "insufficient_evidence":
+        required = set(SUPPORTING_EVIDENCE.get(issue, ())) | set(REQUIRED_EVIDENCE)
+        if any(name not in facts.refs for name in required):
+            problems.append("conclusion_without_required_evidence")
+    if issue == "insufficient_evidence":
+        if output["assessment"]["case_status"] != "needs_investigation":
+            problems.append("insufficient_status")
+        if output["financial_resolution"]["recommended_refund_brl"] != 0:
+            problems.append("insufficient_refund")
 
     finance = output["financial_resolution"]
     lines_total = round(sum(line["amount_brl"] for line in finance["refund_lines"]), 2)
     refund = finance["recommended_refund_brl"]
     if abs(lines_total - refund) > CENT:
         problems.append("refund_lines_total")
-    paid = extract_facts(state).captured_total
-    if refund > paid + CENT:
+    refundable = max(facts.captured_total - facts.refunded_total, 0.0)
+    if refund > refundable + CENT:
         problems.append("refund_exceeds_captured")
     status = output["assessment"]["case_status"]
     if status != "action_required" and refund > 0:
         problems.append("refund_without_action_required")
     if status == "no_action" and any("refund" in a for a in output["resolution_actions"]):
         problems.append("refund_action_on_no_action")
+
+    for claim in output.get("claim_assessments", []):
+        if claim.get("verdict") in {"supported", "partially_supported"} and not claim.get(
+            "evidence_refs"
+        ):
+            problems.append("claim_without_evidence")
+    if facts.conflicts:
+        output_conflicts = {
+            conflict.get("resolution_code") for conflict in output.get("data_conflicts", [])
+        }
+        if any(conflict.resolution_code not in output_conflicts for conflict in facts.conflicts):
+            problems.append("unreported_data_conflict")
 
     observed = {value for item in state.evidence for _, value in iter_id_fields(item.data)}
     entities = output["affected_entities"]
@@ -70,4 +92,6 @@ def verify(state: CaseState, output: dict[str, Any], contracts: Contracts) -> li
 
     if not 0 <= output["assessment"]["confidence"] <= 1:
         problems.append("confidence_bounds")
+    if issue == "insufficient_evidence" and output["assessment"]["confidence"] > 0.3:
+        problems.append("insufficient_confidence")
     return problems
