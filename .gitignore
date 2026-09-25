@@ -26,6 +26,7 @@ traces/*
 !traces/.gitkeep
 dist/*
 !dist/.gitkeep
+debug/
 *.zip
 *.log
 

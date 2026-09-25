@@ -11,6 +11,7 @@ from .config import Settings
 from .contracts import Contracts
 from .mcp_gateway import connect_gateway
 from .permissions import owner_of
+from .probe import probe_cases, summarize
 from .submission import package_submission, validate_artifacts
 from .tools_doc import render_tools_markdown
 from .trace import TraceWriter
@@ -75,6 +76,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     tools = commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
     tools.add_argument("--doc", help="also write a Markdown catalogue, e.g. docs/mcp-tools.md")
+    probe = commands.add_parser("probe", help="collect evidence for cases and dump it to debug/")
+    probe.add_argument("case_ids", nargs="+", metavar="CASE_ID")
+    probe.add_argument("--input-dir", default="inputs", help="folder with <case_id>.json")
+    probe.add_argument("--out", default="debug", help="dump folder (git-ignored)")
     commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -94,6 +99,13 @@ def main() -> None:
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root, args.doc))
+        elif args.command == "probe":
+            states = asyncio.run(
+                probe_cases(root, args.case_ids, root / args.input_dir, root / args.out)
+            )
+            for state in states:
+                print(summarize(state))
+            print(f"OK: {root / args.out}")
         elif args.command == "run":
             asyncio.run(_run(root))
         elif args.command == "validate":
