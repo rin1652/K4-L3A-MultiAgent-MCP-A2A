@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from re import fullmatch
 from typing import Any
 
+from .contracts import Contracts
 from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 
@@ -15,9 +15,6 @@ AGENT_ROLES = (
     "policy-agent",
     "verifier-agent",
 )
-
-EVIDENCE_REF_PATTERN = r"^ev_[A-Za-z0-9_-]{20,96}$"
-
 
 @dataclass(frozen=True)
 class Handoff:
@@ -36,8 +33,10 @@ class Handoff:
             raise ValueError("handoff source and target must be registered agent roles")
         if not self.case_id or not self.task or self.attempt < 1:
             raise ValueError("handoff requires case_id, task and positive attempt")
-        if any(not fullmatch(EVIDENCE_REF_PATTERN, ref) for ref in self.evidence_refs):
-            raise ValueError("handoff contains an invalid evidence_ref")
+
+    def validate(self, contracts: Contracts) -> None:
+        for evidence_ref in self.evidence_refs:
+            contracts.validate_evidence_ref(evidence_ref, "handoff evidence_ref")
 
 
 @dataclass
@@ -45,12 +44,14 @@ class EvidenceLedger:
     """Case-scoped evidence index; refs are accepted only from MCP responses."""
 
     case_id: str
+    contracts: Contracts
     _evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def record(self, evidence: dict[str, Any]) -> str:
+        self.contracts.validate_evidence(evidence)
         evidence_ref = evidence.get("evidence_ref")
-        if not isinstance(evidence_ref, str) or not fullmatch(EVIDENCE_REF_PATTERN, evidence_ref):
-            raise ValueError("MCP response has no valid evidence_ref")
+        if not isinstance(evidence_ref, str):
+            raise ValueError("MCP response has no evidence_ref")
         existing = self._evidence.get(evidence_ref)
         if existing is not None and existing != evidence:
             raise ValueError(f"evidence_ref reused with different content: {evidence_ref}")

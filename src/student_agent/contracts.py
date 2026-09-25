@@ -63,3 +63,11 @@ class Contracts:
 
     def validate_evidence(self, value: Any, label: str = "MCP response") -> None:
         self.validate("mcp-evidence-response-v1.schema.json", value, label)
+
+    def validate_evidence_ref(self, value: Any, label: str = "evidence_ref") -> None:
+        schema = self._schemas["mcp-evidence-response-v1.schema.json"]
+        ref_schema = schema["properties"]["evidence_ref"]
+        validator = Draft202012Validator(ref_schema, format_checker=FormatChecker())
+        errors = sorted(validator.iter_errors(value), key=lambda error: list(error.absolute_path))
+        if errors:
+            raise ContractError(f"{label}: {errors[0].message}")
