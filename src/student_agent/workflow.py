@@ -341,15 +341,22 @@ def _build_case_output(
     policy_rules = policy_data.get("rules", {}) if isinstance(policy_data, dict) else {}
 
     order_status = order_data.get("order_status")
+    payment_rows = payment_data if isinstance(payment_data, list) else []
     captured_total = sum(
         (
             amount
-            for amount in (_decimal(item.get("payment_value")) for item in payment_data)
+            for amount in (
+                _decimal(item.get("payment_value"))
+                for item in payment_rows
+                if isinstance(item, dict)
+            )
             if amount
         ),
         Decimal("0"),
     )
     shipment_events = shipment_data.get("events", [])
+    if not isinstance(shipment_events, list):
+        shipment_events = []
     late_actor = next(
         (
             event.get("actor")
