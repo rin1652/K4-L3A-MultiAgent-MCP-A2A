@@ -55,7 +55,14 @@ def test_every_call_carries_the_case_id_and_only_granted_tools(trace: TraceWrite
 
     assert gateway.calls, "specialists made no MCP call"
     assert {case_id for _, case_id, _ in gateway.calls} == {CASE_ID}
-    specialist_tools = {tool for actor in SPECIALISTS for tool in TOOL_GRANTS[actor]}
+    specialist_tools = {
+        "get_order",
+        "get_order_items",
+        "get_order_payments",
+        "get_payment_timeline",
+        "get_refund_timeline",
+        "get_shipment_summary",
+    }
     assert {tool for tool, _, _ in gateway.calls} == specialist_tools
     for tool in ("get_policy", "get_customer_history", "get_product_context"):
         assert gateway.called(tool) == 0
@@ -67,6 +74,29 @@ def test_arguments_come_from_the_case_only(trace: TraceWriter) -> None:
     gateway = FakeGateway()
     _collect(case(), gateway, trace)
     assert all(args == {"order_id": ORDER_ID} for _, _, args in gateway.calls)
+
+
+def test_order_item_tools_are_gated_by_case_topics(trace: TraceWriter) -> None:
+    gateway = FakeGateway(issue="refund_pending")
+    _collect(case("refund_pending"), gateway, trace)
+    assert gateway.called("get_order") == 1
+    assert gateway.called("get_order_items") == 0
+    assert gateway.called("get_sellers") == 0
+
+
+def test_foreign_order_evidence_is_rejected_before_consumption(trace: TraceWriter) -> None:
+    def data(tool: str, _arguments: dict[str, str]) -> Any:
+        if tool == "get_order":
+            return {"order_id": "foreign-order", "order_status": "canceled"}
+        return FakeGateway().data(tool, _arguments)
+
+    gateway = FakeGateway(data=data)
+    state = _collect(case("canceled_order_paid"), gateway, trace)
+    assert not any(item.tool_name == "get_order" for item in state.evidence)
+    assert any(
+        entry.tool_name == "get_order" and entry.reason is MissingReason.DOMAIN_MISMATCH
+        for entry in state.missing
+    )
 
 
 def test_scoped_gateway_rejects_tools_outside_the_actor_grant() -> None:
@@ -139,7 +169,7 @@ def test_transient_error_then_success_is_used(trace: TraceWriter) -> None:
     gateway = FakeGateway(
         errors={"get_shipment_summary": [MCPError(CONNECTION_CLOSED, "Connection closed")]}
     )
-    state = _collect(case(), gateway, trace)
+    state = _collect(case("unavailable_order_paid"), gateway, trace)
 
     assert gateway.called("get_shipment_summary") == 2
     assert "shipment" in state.evidence_by_domain
@@ -195,7 +225,7 @@ def test_follow_up_round_uses_ids_found_by_another_specialist(trace: TraceWriter
 def test_undiscovered_tool_and_foreign_domain_are_not_used(trace: TraceWriter) -> None:
     tools = {name: spec for name, spec in TOOLS.items() if name != "get_shipment_summary"}
     gateway = FakeGateway(tools=tools, domains={**FakeGateway().domains, "get_sellers": "payment"})
-    state = _collect(case(), gateway, trace)
+    state = _collect(case("unavailable_order_paid"), gateway, trace)
 
     assert gateway.called("get_shipment_summary") == 0
     reasons = {(entry.tool_name, entry.reason) for entry in state.missing}

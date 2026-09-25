@@ -72,6 +72,11 @@ class EvidenceGateway:
         self._session = session
         self._contracts = contracts
         self._tool_specs: dict[str, dict[str, Any]] | None = None
+        # The streamable HTTP MCP session is stateful and the competition gateway
+        # does not safely process overlapping call_tool requests on one session.
+        # Specialists can still be scheduled concurrently; their wire calls are
+        # serialized here so one case does not lose all evidence to generic errors.
+        self._call_lock = asyncio.Lock()
 
     async def list_tools(self) -> list[str]:
         return sorted(await self.describe_tools())
@@ -91,7 +96,8 @@ class EvidenceGateway:
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
-        result = await self._session.call_tool(tool_name, arguments=payload)
+        async with self._call_lock:
+            result = await self._session.call_tool(tool_name, arguments=payload)
         # mcp>=2 names the flag ``is_error``; 1.x used ``isError``.
         if getattr(result, "is_error", None) or getattr(result, "isError", None):
             message = " ".join(

@@ -8,13 +8,14 @@ the case's own history; everything else is reported as excluded, never silently 
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from ..state import CaseState, EvidenceItem
+from ..state import CaseState, DataConflict, EvidenceItem, iter_id_fields
 
 CENT = 0.005
 
@@ -32,9 +33,12 @@ def parse_amount(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     try:
-        return round(float(value), 2)
+        amount = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(amount) or amount < 0:
+        return None
+    return round(amount, 2)
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,8 @@ class CaseFacts:
     late_event_actors: list[str] = field(default_factory=list)
     excluded: Counter[str] = field(default_factory=Counter)
     refs: dict[str, str] = field(default_factory=dict)
+    conflicts: list[DataConflict] = field(default_factory=list)
+    policy_valid: bool = False
 
     # --- derived -------------------------------------------------------------------
     def in_window(self, at: datetime | None) -> bool:
@@ -119,6 +125,13 @@ class CaseFacts:
         return round(sum(a * n for a, n in self.captured_by_amount().items()), 2)
 
     @property
+    def refunded_total(self) -> float:
+        completed = {"completed", "complete", "succeeded", "success", "refunded", "processed"}
+        return round(
+            sum(event.amount for event in self.refunds if event.status.lower() in completed), 2
+        )
+
+    @property
     def is_late(self) -> bool | None:
         if self.delivered_at is None or self.estimated_at is None:
             return None
@@ -137,6 +150,55 @@ def _data(evidence: Iterable[EvidenceItem], tool: str) -> tuple[Any, str | None]
         if item.tool_name == tool:
             return item.data, item.evidence_ref
     return None, None
+
+
+def _order_ids(value: Any) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(identifier for key, identifier in iter_id_fields(value) if key == "order_id")
+    )
+
+
+def _scoped_value(
+    value: Any,
+    expected_order_id: str | None,
+    facts: CaseFacts,
+    tool_name: str,
+) -> Any:
+    """Keep only rows tied to the requested order; unrelated rows are not evidence."""
+    if expected_order_id is None:
+        return value
+    if isinstance(value, Mapping):
+        ids = _order_ids(value)
+        if ids and any(identifier != expected_order_id for identifier in ids):
+            facts.conflicts.append(
+                DataConflict(
+                    field="order_id",
+                    sources=("requested_order_id", tool_name),
+                    selected_source=None,
+                    resolution_code="order_identity_mismatch",
+                    observed={tool_name: ",".join(ids)},
+                )
+            )
+            return None
+        return value
+    if isinstance(value, list):
+        rows: list[Any] = []
+        for row in value:
+            ids = _order_ids(row)
+            if ids and any(identifier != expected_order_id for identifier in ids):
+                facts.conflicts.append(
+                    DataConflict(
+                        field="order_id",
+                        sources=("requested_order_id", tool_name),
+                        selected_source=None,
+                        resolution_code="order_identity_mismatch",
+                        observed={tool_name: ",".join(ids)},
+                    )
+                )
+                continue
+            rows.append(row)
+        return rows
+    return value
 
 
 def _rows(value: Any) -> list[Mapping[str, Any]]:
@@ -172,30 +234,58 @@ def _money_events(facts: CaseFacts, events: Any, label: str) -> list[MoneyEvent]
 def extract_facts(state: CaseState) -> CaseFacts:
     facts = CaseFacts(opened_at=parse_time(state.case.get("opened_at")))
     evidence = state.evidence
+    request = state.case.get("customer_request")
+    claimed_order_id = request.get("claimed_order_id") if isinstance(request, Mapping) else None
+    expected_order_id = claimed_order_id if isinstance(claimed_order_id, str) else None
 
-    order, facts.refs["order"] = _data(evidence, "get_order")
+    order, order_ref = _data(evidence, "get_order")
+    order = _scoped_value(order, expected_order_id, facts, "get_order")
     if isinstance(order, Mapping):
         facts.order_id = order.get("order_id")
+        if isinstance(facts.order_id, str):
+            expected_order_id = facts.order_id
         facts.order_status = order.get("order_status")
         facts.purchase_at = parse_time(order.get("order_purchase_timestamp"))
         facts.carrier_at = parse_time(order.get("order_delivered_carrier_date"))
         facts.delivered_at = parse_time(order.get("order_delivered_customer_date"))
         facts.estimated_at = parse_time(order.get("order_estimated_delivery_date"))
+        if order_ref:
+            facts.refs["order"] = order_ref
+    elif expected_order_id is not None and order_ref:
+        facts.conflicts.append(
+            DataConflict(
+                field="order_id",
+                sources=("customer_request.claimed_order_id", "get_order"),
+                selected_source=None,
+                resolution_code="order_identity_mismatch",
+                observed={"customer_request.claimed_order_id": expected_order_id},
+            )
+        )
 
-    items, facts.refs["items"] = _data(evidence, "get_order_items")
+    items, items_ref = _data(evidence, "get_order_items")
+    items = _scoped_value(items, expected_order_id, facts, "get_order_items")
     for row in _dedupe(_rows(items)):
         if facts.in_window(parse_time(row.get("shipping_limit_date"))):
             facts.items.append(row)
         else:
             facts.excluded["item_outside_window"] += 1
+    if facts.items and items_ref:
+        facts.refs["items"] = items_ref
     facts.seller_ids = list(
         dict.fromkeys(str(row["seller_id"]) for row in facts.items if row.get("seller_id"))
     )
-    _, facts.refs["sellers"] = _data(evidence, "get_sellers")
+    sellers, sellers_ref = _data(evidence, "get_sellers")
+    sellers = _scoped_value(sellers, expected_order_id, facts, "get_sellers")
+    if isinstance(sellers, list) and sellers_ref and sellers:
+        facts.refs["sellers"] = sellers_ref
 
-    payments, facts.refs["payments"] = _data(evidence, "get_order_payments")
+    payments, payments_ref = _data(evidence, "get_order_payments")
+    payments = _scoped_value(payments, expected_order_id, facts, "get_order_payments")
     facts.payment_rows = _rows(payments)
-    timeline, facts.refs["payment_timeline"] = _data(evidence, "get_payment_timeline")
+    if facts.payment_rows and payments_ref:
+        facts.refs["payments"] = payments_ref
+    timeline, timeline_ref = _data(evidence, "get_payment_timeline")
+    timeline = _scoped_value(timeline, expected_order_id, facts, "get_payment_timeline")
     if isinstance(timeline, Mapping):
         if not facts.payment_rows:
             facts.payment_rows = _rows(timeline.get("payments"))
@@ -204,12 +294,18 @@ def extract_facts(state: CaseState) -> CaseFacts:
         facts.mismatches = [
             e for e in events if e.event_type == "reconciliation_mismatch" and e.status == "open"
         ]
+        if timeline_ref:
+            facts.refs["payment_timeline"] = timeline_ref
 
-    refunds, facts.refs["refund_timeline"] = _data(evidence, "get_refund_timeline")
+    refunds, refund_ref = _data(evidence, "get_refund_timeline")
+    refunds = _scoped_value(refunds, expected_order_id, facts, "get_refund_timeline")
     if isinstance(refunds, Mapping):
         facts.refunds = _money_events(facts, refunds.get("events"), "refund_event")
+        if facts.refunds and refund_ref:
+            facts.refs["refund_timeline"] = refund_ref
 
-    shipment, facts.refs["shipment"] = _data(evidence, "get_shipment_summary")
+    shipment, shipment_ref = _data(evidence, "get_shipment_summary")
+    shipment = _scoped_value(shipment, expected_order_id, facts, "get_shipment_summary")
     if isinstance(shipment, Mapping):
         if facts.delivered_at is None:
             facts.delivered_at = parse_time(shipment.get("delivered_customer_at"))
@@ -229,7 +325,34 @@ def extract_facts(state: CaseState) -> CaseFacts:
                 facts.late_event_actors.append(str(event.get("actor", "")))
             else:
                 facts.excluded["shipment_event_unmatched"] += 1
+        if shipment_ref:
+            facts.refs["shipment"] = shipment_ref
 
-    _, facts.refs["policy"] = _data(evidence, "get_policy")
-    facts.refs = {name: ref for name, ref in facts.refs.items() if ref}
+    policy, policy_ref = _data(evidence, "get_policy")
+    expected_policy_version = state.case.get("policy_version")
+    if (
+        isinstance(policy, Mapping)
+        and isinstance(expected_policy_version, str)
+        and policy.get("policy_version") == expected_policy_version
+        and policy.get("currency") == "BRL"
+        and isinstance(policy.get("rules"), Mapping)
+    ):
+        facts.policy_valid = True
+        if policy_ref:
+            facts.refs["policy"] = policy_ref
+    elif policy_ref:
+        facts.conflicts.append(
+            DataConflict(
+                field="policy",
+                sources=("case.policy_version", "get_policy"),
+                selected_source=None,
+                resolution_code="policy_unverified",
+                observed={
+                    "case.policy_version": str(expected_policy_version),
+                    "get_policy.policy_version": str(
+                        policy.get("policy_version") if isinstance(policy, Mapping) else None
+                    ),
+                },
+            )
+        )
     return facts

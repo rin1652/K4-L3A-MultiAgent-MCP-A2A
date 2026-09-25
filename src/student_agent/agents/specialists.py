@@ -62,12 +62,17 @@ class Specialist:
 
     @property
     def tool_names(self) -> tuple[str, ...]:
-        return tuple(step.tool_name for step in self.plan)
+        return tuple(step.tool_name for step in self.steps)
+
+    @property
+    def steps(self) -> tuple[ToolStep, ...]:
+        """The tools assigned to this agent for this case."""
+        return self.plan
 
     async def run(self, seed: KnownIds) -> None:
         """Round 1: run the plan; steps lacking parameters are deferred, not guessed."""
         self.known.merge(seed)
-        for step in self.plan:
+        for step in self.steps:
             await self._run_step(step, final=False)
 
     def resolvable(self, shared: KnownIds) -> list[ToolStep]:
@@ -162,6 +167,38 @@ class OrderItemAgent(Specialist):
         ToolStep("get_sellers"),
     )
 
+    ITEM_TOPICS = frozenset(
+        {
+            "canceled_order_paid",
+            "unavailable_order_paid",
+            "late_delivery_seller",
+            "late_delivery_logistics",
+            "valid_split_payment",
+            "payment_mismatch",
+            "duplicate_charge",
+        }
+    )
+    SELLER_TOPICS = frozenset({"unavailable_order_paid", "late_delivery_seller"})
+
+    def _topics(self) -> set[str]:
+        request = self.case.get("customer_request")
+        claims = request.get("claims", ()) if isinstance(request, Mapping) else ()
+        return {
+            claim.get("topic")
+            for claim in claims
+            if isinstance(claim, Mapping) and isinstance(claim.get("topic"), str)
+        }
+
+    @property
+    def steps(self) -> tuple[ToolStep, ...]:
+        topics = self._topics()
+        steps = [ToolStep("get_order")]
+        if topics & self.ITEM_TOPICS:
+            steps.append(ToolStep("get_order_items"))
+        if topics & self.SELLER_TOPICS:
+            steps.append(ToolStep("get_sellers"))
+        return tuple(steps)
+
     def find_conflicts(self) -> list[DataConflict]:
         request = self.case.get("customer_request") or {}
         claimed = request.get("claimed_order_id") if isinstance(request, Mapping) else None
@@ -176,7 +213,7 @@ class OrderItemAgent(Specialist):
                         field="order_id",
                         sources=("customer_request.claimed_order_id", "get_order"),
                         selected_source=None,
-                        resolution_code="pending_policy",
+                        resolution_code="order_identity_mismatch",
                         observed={
                             "customer_request.claimed_order_id": claimed,
                             "get_order": actual,
