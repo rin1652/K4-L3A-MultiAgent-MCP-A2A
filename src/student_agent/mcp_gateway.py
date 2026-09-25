@@ -8,6 +8,7 @@ from typing import Any
 import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 
 from .contracts import Contracts
 
@@ -31,7 +32,10 @@ class EvidenceGateway:
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
-        result = await self._session.call_tool(tool_name, arguments=payload)
+        try:
+            result = await self._session.call_tool(tool_name, arguments=payload)
+        except MCPError as exc:
+            raise RuntimeError(f"MCP tool {tool_name} failed: {exc}") from exc
         is_error = getattr(result, "isError", getattr(result, "is_error", False))
         if is_error:
             message = " ".join(
